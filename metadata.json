@@ -1,0 +1,6 @@
+{
+  "name": "AI 信息雷达",
+  "description": "面向创业者、产品经理和内容创作者的高效信息采集、AI去重摘要、选题加工与可持续积累的个人知识资产管理平台。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
