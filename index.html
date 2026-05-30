@@ -3,28 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
-    <script>
-      (function() {
-        try {
-          var originalFetch = window.fetch || globalThis.fetch;
-          if (originalFetch) {
-            Object.defineProperty(window, 'fetch', {
-              value: originalFetch,
-              writable: true,
-              configurable: true
-            });
-            Object.defineProperty(globalThis, 'fetch', {
-              value: originalFetch,
-              writable: true,
-              configurable: true
-            });
-          }
-        } catch (e) {
-          console.warn('Sandbox fetch setter guard bypassed:', e);
-        }
-      })();
-    </script>
+    <title>息流 InfoFlow</title>
   </head>
   <body>
     <div id="root"></div>

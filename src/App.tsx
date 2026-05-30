@@ -13,6 +13,33 @@ import AIChatbot from './components/AIChatbot.js';
 import ArticleReader from './components/ArticleReader.js';
 import { Radio, Newspaper, Lightbulb, Compass, Database, Bot, Sparkles, Server, Network, User } from 'lucide-react';
 
+// Setup dynamic fetch proxy to automatically append user configuration headers to backend requests
+const apiFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+  const provider = typeof window !== 'undefined' ? (localStorage.getItem('CUSTOM_AI_PROVIDER') || 'gemini') : 'gemini';
+  const customKey = typeof window !== 'undefined' ? (localStorage.getItem('CUSTOM_GEMINI_API_KEY') || '') : '';
+  const baseUrl = typeof window !== 'undefined' ? (localStorage.getItem('CUSTOM_AI_BASE_URL') || '') : '';
+  const customModel = typeof window !== 'undefined' ? (localStorage.getItem('CUSTOM_AI_MODEL') || '') : '';
+
+  const finalInit = { ...init };
+  const headers = new Headers(finalInit.headers || {});
+  
+  headers.set('x-ai-provider', provider);
+  if (customKey) {
+    headers.set('x-ai-api-key', customKey.trim());
+    headers.set('x-gemini-api-key', customKey.trim());
+    headers.set('x-custom-api-key', customKey.trim());
+  }
+  if (baseUrl) {
+    headers.set('x-ai-base-url', baseUrl.trim());
+  }
+  if (customModel) {
+    headers.set('x-ai-model', customModel.trim());
+  }
+  
+  finalInit.headers = headers;
+  return window.fetch(input, finalInit);
+};
+
 export default function App() {
   const [sources, setSources] = useState<Source[]>([]);
   const [articles, setArticles] = useState<Article[]>([]);
@@ -21,6 +48,46 @@ export default function App() {
 
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
   const [anchoredArticle, setAnchoredArticle] = useState<Article | null>(null);
+
+  // Custom user Large Model configuration states
+  const [customProvider, setCustomProvider] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('CUSTOM_AI_PROVIDER') || 'gemini';
+    }
+    return 'gemini';
+  });
+  const [customApiKey, setCustomApiKey] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('CUSTOM_GEMINI_API_KEY') || '';
+    }
+    return '';
+  });
+  const [customBaseUrl, setCustomBaseUrl] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('CUSTOM_AI_BASE_URL') || '';
+    }
+    return '';
+  });
+  const [customModel, setCustomModel] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('CUSTOM_AI_MODEL') || '';
+    }
+    return '';
+  });
+
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsProviderInput, setSettingsProviderInput] = useState(customProvider);
+  const [settingsKeyInput, setSettingsKeyInput] = useState(customApiKey);
+  const [settingsBaseUrlInput, setSettingsBaseUrlInput] = useState(customBaseUrl);
+  const [settingsModelInput, setSettingsModelInput] = useState(customModel);
+
+  // Sync settings input states when values change
+  useEffect(() => {
+    setSettingsProviderInput(customProvider);
+    setSettingsKeyInput(customApiKey);
+    setSettingsBaseUrlInput(customBaseUrl);
+    setSettingsModelInput(customModel);
+  }, [customProvider, customApiKey, customBaseUrl, customModel]);
 
   // Loading and Error global states
   const [loadingArticles, setLoadingArticles] = useState(false);
@@ -31,7 +98,7 @@ export default function App() {
   // 1. Synchronize sources
   const fetchSources = async () => {
     try {
-      const res = await fetch('/api/sources');
+      const res = await apiFetch('/api/sources');
       const data = await res.json();
       setSources(data);
     } catch (e) {
@@ -41,7 +108,7 @@ export default function App() {
 
   const handleAddSource = async (sourceData: { name: string; url: string; type: Source['type']; category: string; tags: string[] }) => {
     try {
-      const res = await fetch('/api/sources', {
+      const res = await apiFetch('/api/sources', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(sourceData),
@@ -56,7 +123,7 @@ export default function App() {
 
   const handleToggleSourceStatus = async (id: string, currentlyActive: boolean) => {
     try {
-      const res = await fetch(`/api/sources/${id}`, {
+      const res = await apiFetch(`/api/sources/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: currentlyActive ? 'inactive' : 'active' }),
@@ -71,7 +138,7 @@ export default function App() {
 
   const handleDeleteSource = async (id: string) => {
     try {
-      const res = await fetch(`/api/sources/${id}`, {
+      const res = await apiFetch(`/api/sources/${id}`, {
         method: 'DELETE',
       });
       if (res.ok) {
@@ -84,7 +151,7 @@ export default function App() {
 
   const handleSyncSource = async (id: string) => {
     try {
-      const res = await fetch(`/api/sources/${id}/sync`, {
+      const res = await apiFetch(`/api/sources/${id}/sync`, {
         method: 'POST',
       });
       if (res.ok) {
@@ -97,7 +164,7 @@ export default function App() {
 
   const handleSyncAllSources = async () => {
     try {
-      const res = await fetch('/api/sources/sync-all', {
+      const res = await apiFetch('/api/sources/sync-all', {
         method: 'POST',
       });
       if (res.ok) {
@@ -112,7 +179,7 @@ export default function App() {
   const fetchArticles = async (sortBy: string = 'newest') => {
     setLoadingArticles(true);
     try {
-      const res = await fetch(`/api/articles?sortBy=${sortBy}`);
+      const res = await apiFetch(`/api/articles?sortBy=${sortBy}`);
       const data = await res.json();
       setArticles(data);
 
@@ -130,7 +197,7 @@ export default function App() {
 
   const handleToggleFavorite = async (id: string) => {
     try {
-      const res = await fetch('/api/articles/toggle-favorite', {
+      const res = await apiFetch('/api/articles/toggle-favorite', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id }),
@@ -145,7 +212,7 @@ export default function App() {
 
   const handleToggleLike = async (id: string) => {
     try {
-      const res = await fetch('/api/articles/toggle-like', {
+      const res = await apiFetch('/api/articles/toggle-like', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id }),
@@ -160,7 +227,7 @@ export default function App() {
 
   const handleSaveNotes = async (id: string, notes: string) => {
     try {
-      const res = await fetch(`/api/articles/${id}/notes`, {
+      const res = await apiFetch(`/api/articles/${id}/notes`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ notes }),
@@ -176,7 +243,7 @@ export default function App() {
   const handleGenerateAI = async (id: string) => {
     setLoadingAction(true);
     try {
-      const res = await fetch(`/api/articles/${id}/generate-ai`, {
+      const res = await apiFetch(`/api/articles/${id}/generate-ai`, {
         method: 'POST',
       });
       if (!res.ok) {
@@ -192,7 +259,7 @@ export default function App() {
   const handleCrawlArticle = async (url: string, sourceType: string, category: string) => {
     setCrawlLoading(true);
     try {
-      const res = await fetch('/api/articles/crawl', {
+      const res = await apiFetch('/api/articles/crawl', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url, source_type: sourceType, category_name: category }),
@@ -209,7 +276,7 @@ export default function App() {
   // 3. Briefings System Syncs
   const fetchBriefs = async () => {
     try {
-      const res = await fetch('/api/briefs');
+      const res = await apiFetch('/api/briefs');
       const data = await res.json();
       setBriefs(data);
     } catch (e) {
@@ -220,7 +287,7 @@ export default function App() {
   const handleGenerateReport = async () => {
     setLoadingBriefs(true);
     try {
-      const res = await fetch('/api/briefs/generate', {
+      const res = await apiFetch('/api/briefs/generate', {
         method: 'POST',
       });
       if (!res.ok) {
@@ -238,7 +305,7 @@ export default function App() {
 
   // 4. Chatbot processor
   const handleSendMessage = async (messages: QAMessage[]) => {
-    const res = await fetch('/api/ai/chatbot', {
+    const res = await apiFetch('/api/ai/chatbot', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -273,7 +340,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-base font-extrabold text-gray-950 tracking-tight leading-none">
-                AI 信息雷达 <span className="text-xs font-medium text-gray-400 font-mono">MVP v1.0</span>
+                息流 InfoFlow <span className="text-xs font-medium text-gray-400 font-mono">v1.0</span>
               </h1>
               <p className="text-[10px] text-gray-450 mt-1 uppercase tracking-widest font-mono">
                 Knowledge Asset Acquisition & Refinement Station
@@ -282,11 +349,16 @@ export default function App() {
           </div>
 
           <div className="flex items-center space-x-4">
-            <div className="hidden md:flex items-center space-x-2.5 text-xs bg-slate-50 border border-slate-150 px-3.5 py-2 rounded-xl">
-              <Server className="w-3.5 h-3.5 text-emerald-500" />
-              <span className="text-slate-500 tracking-tight">大模型后台代理节点: <span className="font-bold text-slate-800">GEMINI_API_KEY</span></span>
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-            </div>
+            <button
+              onClick={() => setIsSettingsOpen(true)}
+              className="flex items-center space-x-2.5 text-xs bg-slate-50 border border-slate-150 px-3.5 py-2 rounded-xl hover:bg-slate-100 transition-all cursor-pointer shadow-xs"
+            >
+              <Server className={`w-3.5 h-3.5 ${customApiKey ? 'text-rose-500' : 'text-emerald-500'}`} />
+              <span className="text-slate-500 tracking-tight">
+                大模型代理节点: <span className="font-bold text-slate-800">{customApiKey ? `${customProvider.toUpperCase()} (${customModel || '自定义'})` : '系统默认'}</span>
+              </span>
+              <span className={`w-1.5 h-1.5 rounded-full ${customApiKey ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500'}`} />
+            </button>
 
             <div className="text-xs font-mono text-gray-400">
               UTC: 14:11:31
@@ -471,9 +543,163 @@ export default function App() {
         />
       )}
 
+      {/* Dynamic API Configuration Settings Modal */}
+      {isSettingsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4 sm:p-6 animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md border border-slate-100 overflow-hidden transform transition-all animate-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-slate-50">
+              <div className="flex items-center space-x-2">
+                <Network className="w-4 h-4 text-rose-500 animate-pulse" />
+                <h3 className="text-sm sm:text-base font-bold text-gray-900">
+                  大模型底座 & 分布式代理配置
+                </h3>
+              </div>
+              <button
+                onClick={() => setIsSettingsOpen(false)}
+                className="text-gray-400 hover:text-gray-600 transition-colors cursor-pointer text-xl font-bold leading-none p-1.5 hover:bg-gray-100 rounded-lg"
+              >
+                ×
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-6 space-y-4">
+              <p className="text-xs text-gray-500 leading-relaxed">
+                系统内置了对各类主流 LLM API (Gemini, OpenAI, 各种基于 DeepSeek 的兼容API) 的完美后端路由。您只需在下方完成参数指定：
+              </p>
+
+              <div className="space-y-4">
+                {/* Provider select */}
+                <div className="space-y-1.5">
+                  <label className="block text-[11px] font-bold text-gray-600 uppercase tracking-wider">
+                    服务提供商 (Model Provider)
+                  </label>
+                  <select
+                    value={settingsProviderInput}
+                    onChange={(e) => setSettingsProviderInput(e.target.value)}
+                    className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 focus:outline-none focus:ring-1 focus:ring-rose-500 focus:bg-white text-gray-800"
+                  >
+                    <option value="gemini">Google Gemini API</option>
+                    <option value="openai">OpenAI API 兼容系列</option>
+                    <option value="deepseek">DeepSeek 官方 API</option>
+                    <option value="other">自定义三方 OpenAI-compatible 端点</option>
+                  </select>
+                </div>
+
+                {/* API Key */}
+                <div className="space-y-1.5">
+                  <label className="block text-[11px] font-bold text-gray-600 uppercase tracking-wider">
+                    API 访问秘钥 (API Secret Key)
+                  </label>
+                  <input
+                    type="password"
+                    placeholder="sk-xxx... / AIzaSy... (不填则默认读取后台自带环境变量)"
+                    value={settingsKeyInput}
+                    onChange={(e) => setSettingsKeyInput(e.target.value)}
+                    className="w-full text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 focus:outline-none focus:ring-1 focus:ring-rose-500 focus:bg-white text-gray-800"
+                  />
+                </div>
+
+                {/* Custom Base URL */}
+                <div className="space-y-1.5">
+                  <label className="block text-[11px] font-bold text-gray-600 uppercase tracking-wider">
+                    自定义 API 基础代理端点 (Base URL)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="https://api.deepseek.com/v1 等 (Gemini默认留空)"
+                    value={settingsBaseUrlInput}
+                    onChange={(e) => setSettingsBaseUrlInput(e.target.value)}
+                    className="w-full text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 focus:outline-none focus:ring-1 focus:ring-rose-500 focus:bg-white text-gray-800"
+                  />
+                </div>
+
+                {/* Custom Model Name */}
+                <div className="space-y-1.5">
+                  <label className="block text-[11px] font-bold text-gray-600 uppercase tracking-wider">
+                    指定调用的模型标识符 (Model Base Name)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="deepseek-chat / gpt-4o-mini / gemini-2.5-pro 等"
+                    value={settingsModelInput}
+                    onChange={(e) => setSettingsModelInput(e.target.value)}
+                    className="w-full text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 focus:outline-none focus:ring-1 focus:ring-rose-500 focus:bg-white text-gray-800"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="px-6 py-3.5 bg-slate-50 border-t border-gray-100 flex items-center justify-end space-x-2">
+              <button
+                onClick={() => {
+                  setSettingsProviderInput('gemini');
+                  setSettingsKeyInput('');
+                  setSettingsBaseUrlInput('');
+                  setSettingsModelInput('');
+                  localStorage.removeItem('CUSTOM_AI_PROVIDER');
+                  localStorage.removeItem('CUSTOM_GEMINI_API_KEY');
+                  localStorage.removeItem('CUSTOM_AI_BASE_URL');
+                  localStorage.removeItem('CUSTOM_AI_MODEL');
+                  setCustomProvider('gemini');
+                  setCustomApiKey('');
+                  setCustomBaseUrl('');
+                  setCustomModel('');
+                  setIsSettingsOpen(false);
+                }}
+                className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-gray-600 hover:bg-gray-150 transition-all cursor-pointer"
+              >
+                清除所有自定义设置
+              </button>
+              <button
+                onClick={() => {
+                  const prov = settingsProviderInput.trim() || 'gemini';
+                  const key = settingsKeyInput.trim();
+                  const url = settingsBaseUrlInput.trim();
+                  const mod = settingsModelInput.trim();
+
+                  localStorage.setItem('CUSTOM_AI_PROVIDER', prov);
+                  setCustomProvider(prov);
+
+                  if (key) {
+                    localStorage.setItem('CUSTOM_GEMINI_API_KEY', key);
+                    setCustomApiKey(key);
+                  } else {
+                    localStorage.removeItem('CUSTOM_GEMINI_API_KEY');
+                    setCustomApiKey('');
+                  }
+
+                  if (url) {
+                    localStorage.setItem('CUSTOM_AI_BASE_URL', url);
+                    setCustomBaseUrl(url);
+                  } else {
+                    localStorage.removeItem('CUSTOM_AI_BASE_URL');
+                    setCustomBaseUrl('');
+                  }
+
+                  if (mod) {
+                    localStorage.setItem('CUSTOM_AI_MODEL', mod);
+                    setCustomModel(mod);
+                  } else {
+                    localStorage.removeItem('CUSTOM_AI_MODEL');
+                    setCustomModel('');
+                  }
+                  setIsSettingsOpen(false);
+                }}
+                className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-rose-500 hover:bg-rose-600 text-white transition-all cursor-pointer"
+              >
+                确认并应用新代理
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Footer bar credits */}
       <footer className="bg-white border-t border-gray-150 py-4 px-6 text-center text-xs text-gray-400 select-none tracking-tight leading-none shrink-0">
-        AI 信息雷达 @ 2026. Made with Google GenAI & React. All rights reserved.
+        息流 InfoFlow @ 2026. Made with Google GenAI & React. All rights reserved.
       </footer>
     </div>
   );

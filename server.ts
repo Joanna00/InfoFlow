@@ -20,14 +20,163 @@ app.use(express.json());
 
 // Initialize Gemini SDK with telemetry header
 const geminiApiKey = process.env.GEMINI_API_KEY || '';
-const ai = new GoogleGenAI({
-  apiKey: geminiApiKey,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
+
+// Helper to handle AI generation dynamically across model/provider configurations
+async function handleAICall(req: express.Request, options: {
+  prompt?: string;
+  systemInstruction?: string;
+  responseMimeType?: string; // 'application/json' or 'text/plain'
+  messages?: any[];
+}): Promise<string> {
+  const provider = (req.headers['x-ai-provider'] as string || 'gemini').toLowerCase();
+  const rawKey = req.headers['x-ai-api-key'] || req.headers['x-gemini-api-key'] || req.headers['x-custom-api-key'];
+  const customKey = typeof rawKey === 'string' ? rawKey.trim() : '';
+  const customBaseUrl = req.headers['x-ai-base-url'] as string || '';
+  const customModel = req.headers['x-ai-model'] as string || '';
+
+  let apiKey = customKey;
+  if (!apiKey) {
+    if (provider === 'openai') {
+      apiKey = process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY || '';
+    } else if (provider === 'deepseek') {
+      apiKey = process.env.DEEPSEEK_API_KEY || process.env.GEMINI_API_KEY || '';
+    } else {
+      apiKey = process.env.GEMINI_API_KEY || '';
+    }
+  }
+
+  if (!apiKey) {
+    throw new Error('未检测到有效的 API 密钥，请在“大模型配置”面板中配置您的密钥。');
+  }
+
+  const isJSON = options.responseMimeType === 'application/json';
+
+  // 1. OpenAI or OpenAI-Compatible Multi-model Gateway
+  if (provider === 'openai' || customBaseUrl || provider === 'deepseek' || provider === 'other') {
+    let baseUrl = '';
+    if (customBaseUrl) {
+      baseUrl = customBaseUrl.trim();
+    } else {
+      if (provider === 'deepseek') {
+        baseUrl = 'https://api.deepseek.com';
+      } else {
+        baseUrl = 'https://api.openai.com/v1';
+      }
+    }
+    baseUrl = baseUrl.replace(/\/$/, '');
+
+    // Resolve model
+    let defaultModel = 'gpt-4o-mini';
+    if (provider === 'deepseek') {
+      defaultModel = 'deepseek-chat';
+    } else if (customModel) {
+      defaultModel = customModel.trim();
+    }
+
+    // Build standard list of messages
+    const formattedMessages: any[] = [];
+    if (options.systemInstruction) {
+      formattedMessages.push({ role: 'system', content: options.systemInstruction });
+    }
+
+    if (options.messages && options.messages.length > 0) {
+      formattedMessages.push(...options.messages.map(m => {
+        let role = m.role || 'user';
+        if (role === 'model') role = 'assistant';
+        let content = '';
+        if (m.content) {
+          content = m.content;
+        } else if (m.parts && m.parts[0]) {
+          content = m.parts[0].text || '';
+        } else if (m.text) {
+          content = m.text;
+        } else {
+          content = String(m);
+        }
+        return { role, content };
+      }));
+    } else if (options.prompt) {
+      formattedMessages.push({ role: 'user', content: options.prompt });
+    }
+
+    const requestBody: any = {
+      model: defaultModel,
+      messages: formattedMessages,
+      temperature: 0.6,
+    };
+
+    if (isJSON) {
+      requestBody.response_format = { type: 'json_object' };
+    }
+
+    try {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`底层接口调用返回错误 (HTTP ${response.status}): ${errText}`);
+      }
+
+      const resJson = await response.json() as any;
+      const text = resJson.choices?.[0]?.message?.content || '';
+      return text;
+    } catch (err: any) {
+      console.error('Error in calling OpenAI-compatible endpoint:', err);
+      throw err;
+    }
+  }
+
+  // 2. Default Google Gemini SDK path
+  const modelToUse = customModel ? customModel.trim() : 'gemini-3.5-flash';
+  const localAi = new GoogleGenAI({
+    apiKey: apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
     },
-  },
-});
+  });
+
+  if (options.messages && options.messages.length > 0) {
+    const formattedGeminiMessages = options.messages.map(m => {
+      // Map correctly to role & parts
+      const role = m.role === 'assistant' ? 'model' : (m.role || 'user');
+      let parts = m.parts;
+      if (!parts) {
+        const text = m.text || m.content || String(m);
+        parts = [{ text }];
+      }
+      return { role, parts };
+    });
+
+    const response = await localAi.models.generateContent({
+      model: modelToUse,
+      contents: formattedGeminiMessages,
+      config: {
+        systemInstruction: options.systemInstruction,
+        responseMimeType: isJSON ? 'application/json' : undefined,
+      },
+    });
+    return response.text || '';
+  } else {
+    const response = await localAi.models.generateContent({
+      model: modelToUse,
+      contents: options.prompt || '',
+      config: {
+        systemInstruction: options.systemInstruction,
+        responseMimeType: isJSON ? 'application/json' : undefined,
+      },
+    });
+    return response.text || '';
+  }
+}
 
 const DB_PATH = path.join(process.cwd(), 'db.json');
 
@@ -221,7 +370,7 @@ OpenAI 首席科学家表示：“这是迈向全自主生产力软件的重要�
       tags: ['学术论文', '大语言模型', '纠错机制'],
       content: `本文研究了当大语言模型（LLM）遇到错误推理链（Reasoning Hallucination）或不确定输入时，如何进行系统自适应“主动纠偏”（Initiative Error Correction）。研究提出了一种双线程对齐网络。其中，主输出线程负责以低延迟返回交互文本，而监控子线程则实时分析词向量熵变。如果熵变异常，系统将立即冻结主线程输出，并注入主动澄清疑问 Prompt。
 
-论文评估结果表明，在高精准场景（如在线法律诉询、银行个人结息与退税申诉）中，双线程对齐机制可以将传统幻觉率拉低大约 68.4%。但也由此增加了 20% 左右的算力冗余。这为了商业化落地和边缘端运行时的优化提出了新的挑战。`,
+论文评估结果表明，在高精准场景（如在线法律诉询、银行个人结息与退税申诉）中，双线程对齐机制可以将传统幻觉率拉低大约 68.4%。但也由此增加了 20% 左右的算力冗余。这为了商业化落地 and 边缘端运行时的优化提出了新的挑战。`,
     },
     {
       id: 'art-4',
@@ -239,7 +388,7 @@ OpenAI 首席科学家表示：“这是迈向全自主生产力软件的重要�
       content: `这篇在 Hacker News 上获得 650+ 点赞的热门讨论探究了在超级厂商（OpenAI、Microsoft、Google）层出不穷、功能几乎吞噬一切的大环境下，单兵作战或 3 个人规模的微型 SaaS 团队的核心立足点。
 
 绝大多数回帖达成共识：与强大的 API 直接赛跑已经毫无胜算。小微产品必须：
-1. 聚焦极其小众且对安全合规极高的本地/私网孤岛（比如医疗诊所的合规日历、地方法庭的语音归档加密检索）。
+1. 聚焦极其小众且对安全合规极高的本地/私网孤岛（比如医疗诊书的合规日历、地方法庭的语音归档加密检索）。
 2. 将服务“体验化”与“重线下定制相结合”。AI 可以写一万行代码，但不能坐到企业客户的桌子旁，花半天时间帮其梳理内部杂乱无序的遗留报表。
 3. 拥抱极端复古的简约设计。许多高阶经理人对复杂的多层仪表盘早已产生了视觉疲劳，他们甚至更愿意为一个“每天定时发送一封极简高精邮件汇报”的小工具付费。`,
     },
@@ -266,16 +415,16 @@ OpenAI 首席科学家表示：“这是迈向全自主生产力软件的重要�
       ],
       trending_topics: ['#多智能体协作(Multi-Agent)', '#自然语言编程', '#独立开发者防身指南', '#主动纠错幻觉阻断'],
       recommendations: [
-        '研究 OpenAI 协作流接口。建议针对特定高价值企业应用（如跨国供应链对账）设计多重代理审批流。',
+        '研究 OpenAI 协作流接口。建议针对特定 high-value 企业应用设计多重代理审批流。',
         '降低纯工具界面的技术开发投入，转而专注于深度的细分私有数据源收集与独家专有连接流。',
       ],
       opportunities: [
-        '“零代码多智能体混合编排看板” —— 帮助非技术岗位的主管，在无代码的情况下自由指定角色并拉群，让 AI 协作解决财务、法务等跨部门长链条工作。',
-        '高保密本地化 LLM 主动对齐与异常中止网关（对应顶会双线程论文）。',
+        '“零代码多智能体混合编排看板” —— 帮助非技术岗位主管指定角色并协同解决跨部门长链条工作。',
+        '高保密本地化 LLM 主动对齐与异常中止网关。',
       ],
       actions: [
         '下载 Cursor Clone 项目，观察其提示词设计和编辑器与 AI 面板交互机制。',
-        '对订阅源开展细化分类，增加“冷门高价值投资沙龙”与“冷门科技个人博客”以避免主流平台的信息过载和同质化。',
+        '对订阅源开展细化分类，增加“冷门高价值投资沙龙”与“冷门科技个人博客”以避免主流平台信息过载。',
       ],
     },
   ];
@@ -364,6 +513,12 @@ app.put('/api/sources/:id', (req, res) => {
   res.json(currentDb.sources[index]);
 });
 
+app.delete('/api/sources/:id', (req, res) => {
+  const { id } = req.params;
+  currentDb.sources = currentDb.sources.filter((s) => s.id !== id);
+  saveDb();
+  res.json({ success: true });
+});
 
 // 1.1 Sources Sync Simulation APIs
 app.post('/api/sources/:id/sync', async (req, res) => {
@@ -379,9 +534,8 @@ app.post('/api/sources/:id/sync', async (req, res) => {
   const newArticlesFound: Article[] = [];
 
   // Generate brand new highly relative articles based on this source name & type & tags dynamically
-  if (geminiApiKey) {
-    try {
-      const prompt = `您是一个先进的信息监测同步引擎。我们的用户已经订阅了一个渠道：
+  try {
+    const prompt = `您是一个先进的信息监测同步引擎。我们的用户已经订阅了一个渠道：
 名称: "${source.name}"
 链接或账号ID: "${source.url}"
 渠道类型: "${source.type}" (如 website, wechat, rss, x, keyword)
@@ -396,41 +550,44 @@ app.post('/api/sources/:id/sync', async (req, res) => {
   "tags": ["标签1", "标签2", "标签3"]
 }`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.5-flash',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-        },
-      });
+    const responseText = await handleAICall(req, {
+      prompt,
+      responseMimeType: 'application/json',
+    });
 
-      const parsed = JSON.parse(response.text || '{}');
-      if (parsed.title && parsed.content) {
-        const item: Article = {
-          id: `art-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-          title: parsed.title,
-          author: parsed.author || source.name,
-          publish_time: new Date().toISOString(),
-          source: source.name,
-          source_type: source.type,
-          url: source.url || 'https://radar.ai/intelligence-search',
-          images: [`https://picsum.photos/seed/${Math.floor(Math.random() * 1000)}/800/450`],
-          ai_score: Math.floor(Math.random() * 15) + 80,
-          is_favorite: false,
-          is_liked: false,
-          tags: parsed.tags || source.tags,
-          content: parsed.content,
-        };
-        currentDb.articles.unshift(item);
-        newArticlesFound.push(item);
-        syncedArticlesCount++;
-      }
-    } catch (e) {
-      console.error('Source sync tool failed, fallback to template:', e);
+    let cleanedText = responseText.trim();
+    if (cleanedText.startsWith('```json')) {
+      cleanedText = cleanedText.replace(/^```json/, '').replace(/```$/, '').trim();
+    } else if (cleanedText.startsWith('```')) {
+      cleanedText = cleanedText.replace(/^```/, '').replace(/```$/, '').trim();
     }
+
+    const parsed = JSON.parse(cleanedText || '{}');
+    if (parsed.title && parsed.content) {
+      const item: Article = {
+        id: `art-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        title: parsed.title,
+        author: parsed.author || source.name,
+        publish_time: new Date().toISOString(),
+        source: source.name,
+        source_type: source.type,
+        url: source.url || 'https://radar.ai/intelligence-search',
+        images: [`https://picsum.photos/seed/${Math.floor(Math.random() * 1000)}/800/450`],
+        ai_score: Math.floor(Math.random() * 15) + 80,
+        is_favorite: false,
+        is_liked: false,
+        tags: parsed.tags || source.tags,
+        content: parsed.content,
+      };
+      currentDb.articles.unshift(item);
+      newArticlesFound.push(item);
+      syncedArticlesCount++;
+    }
+  } catch (e) {
+    console.error('Source sync tool failed, fallback to template:', e);
   }
 
-  // Fallback if Gemini failed or is not configured yet
+  // Fallback if AI sync failed or is not configured yet
   if (syncedArticlesCount === 0) {
     const item: Article = {
       id: `art-${Date.now()}`,
@@ -474,9 +631,8 @@ app.post('/api/sources/sync-all', async (req, res) => {
     source.lastFetched = new Date().toISOString();
     let synced = false;
 
-    if (geminiApiKey) {
-      try {
-        const prompt = `您是“AI信息雷达”的信息采集模拟引擎。用户订阅了渠道：
+    try {
+      const prompt = `您是“AI信息雷达”的信息采集模拟引擎。用户订阅了渠道：
 名称: "${source.name}"
 渠道类型: "${source.type}" (url: ${source.url})
 时间: 2026年5月30日
@@ -489,39 +645,42 @@ app.post('/api/sources/sync-all', async (req, res) => {
 }
 不要用任何格式化代码包裹块，直接输出 JSON 纯文本。`;
 
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.5-flash',
-          contents: prompt,
-          config: {
-            responseMimeType: 'application/json',
-          },
-        });
+      const responseText = await handleAICall(req, {
+        prompt,
+        responseMimeType: 'application/json',
+      });
 
-        const parsed = JSON.parse(response.text || '{}');
-        if (parsed.title && parsed.content) {
-          const item: Article = {
-            id: `art-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-            title: parsed.title,
-            author: parsed.author || source.name,
-            publish_time: new Date().toISOString(),
-            source: source.name,
-            source_type: source.type,
-            url: source.url || 'https://radar.ai/intelligence-search',
-            images: [`https://picsum.photos/seed/${Math.floor(Math.random() * 1000)}/800/450`],
-            ai_score: Math.floor(Math.random() * 15) + 80,
-            is_favorite: false,
-            is_liked: false,
-            tags: source.tags,
-            content: parsed.content,
-          };
-          currentDb.articles.unshift(item);
-          newlyCreated.push(item);
-          totalCount++;
-          synced = true;
-        }
-      } catch (e) {
-        console.error('Multi sync fallback due to Gemini error:', e);
+      let cleanedText = responseText.trim();
+      if (cleanedText.startsWith('```json')) {
+        cleanedText = cleanedText.replace(/^```json/, '').replace(/```$/, '').trim();
+      } else if (cleanedText.startsWith('```')) {
+        cleanedText = cleanedText.replace(/^```/, '').replace(/```$/, '').trim();
       }
+
+      const parsed = JSON.parse(cleanedText || '{}');
+      if (parsed.title && parsed.content) {
+        const item: Article = {
+          id: `art-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          title: parsed.title,
+          author: parsed.author || source.name,
+          publish_time: new Date().toISOString(),
+          source: source.name,
+          source_type: source.type,
+          url: source.url || 'https://radar.ai/intelligence-search',
+          images: [`https://picsum.photos/seed/${Math.floor(Math.random() * 1000)}/800/450`],
+          ai_score: Math.floor(Math.random() * 15) + 80,
+          is_favorite: false,
+          is_liked: false,
+          tags: source.tags,
+          content: parsed.content,
+        };
+        currentDb.articles.unshift(item);
+        newlyCreated.push(item);
+        totalCount++;
+        synced = true;
+      }
+    } catch (e) {
+      console.error('Multi sync fallback due to AI model error:', e);
     }
 
     if (!synced) {
@@ -551,6 +710,7 @@ app.post('/api/sources/sync-all', async (req, res) => {
   saveDb();
   res.json({ success: true, count: totalCount, articles: newlyCreated });
 });
+
 
 app.delete('/api/sources/:id', (req, res) => {
   const { id } = req.params;
@@ -614,7 +774,7 @@ app.put('/api/articles/:id/notes', (req, res) => {
   res.json(art);
 });
 
-// 3. AI Tasks Processor via Gemini API
+// 3. AI Tasks Processor via Multiple LLM Engines
 app.post('/api/articles/:id/generate-ai', async (req, res) => {
   const { id } = req.params;
   const art = currentDb.articles.find((a) => a.id === id);
@@ -622,14 +782,8 @@ app.post('/api/articles/:id/generate-ai', async (req, res) => {
     return res.status(404).json({ error: 'Article not found' });
   }
 
-  if (!geminiApiKey) {
-    return res.status(400).json({
-      error: '请先在系统 Secrets 面板中配置您的 GEMINI_API_KEY。',
-    });
-  }
-
   try {
-    const prompt = `您是顶尖的AI知识资产提炼官、商业分析专家和内容创作者。下面是一篇用户采集的文章内容。请对其进行全方位的智能知识提炼加工，要求使用中文返回一个结构完备的JSON响应。
+    const prompt = `您是顶尖的AI知识资产提炼官、商业分析专家 and 内容创作者。下面是一篇用户采集的文章内容。请对其进行全方位的智能知识提炼加工，要求使用中文返回一个结构完备的JSON响应。
 
 文章标题: "${art.title}"
 文章来源: "${art.source}" (${art.source_type})
@@ -642,13 +796,13 @@ app.post('/api/articles/:id/generate-ai', async (req, res) => {
     "one_sentence": "用一句话精准概括文章精髓，具有高信息密度",
     "takeaways": ["提炼三点最核心的内容摘要，每点不少于40字", "第二个核心摘要", "第三个核心摘要"],
     "views": ["文章中表达的重要或具有争议的核心观点", "另一个观点（如有，或者作者隐藏的犀利思考）"],
-    "stats": ["文章引用的关键定量数据、百分比、时间周期等（需注明场景，无则写'暂无公开定量数据'）", "第二条定量数据"]
+    "stats": ["文章引用的关键定量数据、百分比、时间周期等（需注明场景，无则写\'暂无公开定量数据\'）", "第二条定量数据"]
   },
   "knowledge_card": {
     "concept": "提取出的核心技术名、商业理论或方法论名词与核心简短定义",
     "background": "该概念诞生的行业背景、所解决的痛点和瓶颈是什么",
     "views": "关于该概念，当下的核心研判和未来技术/产品演变路线倾向",
-    "cases": "相关的商业实践、行业测试案例或著名验证落地表现",
+    "cases": "相关的商业实践、行业测试案例 or 已有验证落地表现",
     "scenarios": "该概念最佳落地、最适格套用的垂直业务场景（如：高保密对账、快节奏社群、微型SaaS等）",
     "reading": "推荐给读者的延伸阅读方向或参考资料文献类型"
   },
@@ -668,15 +822,19 @@ app.post('/api/articles/:id/generate-ai', async (req, res) => {
   }
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-      },
+    const responseText = await handleAICall(req, {
+      prompt,
+      responseMimeType: 'application/json',
     });
 
-    const parsed = JSON.parse(response.text || '{}');
+    let cleanedText = responseText.trim();
+    if (cleanedText.startsWith('```json')) {
+      cleanedText = cleanedText.replace(/^```json/, '').replace(/```$/, '').trim();
+    } else if (cleanedText.startsWith('```')) {
+      cleanedText = cleanedText.replace(/^```/, '').replace(/```$/, '').trim();
+    }
+
+    const parsed = JSON.parse(cleanedText || '{}');
 
     // Feed generated objects back to database item
     art.ai_summary = {
@@ -731,17 +889,16 @@ app.post('/api/articles/crawl', async (req, res) => {
     return res.status(400).json({ error: 'Please submit a valid URL platform link or keyword' });
   }
 
-  // Check if Gemini is loaded for intelligent context expansion.
-  // If API key is configured, let's call Gemini to construct a beautiful realistic mock web post
+  // Check if model config is loaded for intelligent context expansion.
+  // If API key is configured, let's call AI to construct a beautiful realistic mock web post
   // based on crawling simulation. If not, fallback to styled templates.
   let crawledTitle = '未命名采集篇目';
   let crawledAuthor = '自助采集机器人';
   let crawledContent = '';
   let mockTags: string[] = ['自助分析', '全网监控'];
 
-  if (geminiApiKey) {
-    try {
-      const prompt = `您是一个先进的信息网站网页爬虫模拟器。现在用户提交了一个采集线索（可以是一个URL、或者某个希望监控的关键词/公众号名）。
+  try {
+    const prompt = `您是一个先进的信息网站网页爬虫模拟器。现在用户提交了一个采集线索（可以是一个URL、或者某个希望监控的关键词/公众号名）。
 线索名称: "${url}"
 线索类型: "${source_type || 'auto'}"
 
@@ -756,22 +913,27 @@ app.post('/api/articles/crawl', async (req, res) => {
   "tags": ["标签1", "标签2", "标签3"]
 }`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.5-flash',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-        },
-      });
+    const responseText = await handleAICall(req, {
+      prompt,
+      responseMimeType: 'application/json',
+    });
 
-      const parsed = JSON.parse(response.text || '{}');
+    let cleanedText = responseText.trim();
+    if (cleanedText.startsWith('```json')) {
+      cleanedText = cleanedText.replace(/^```json/, '').replace(/```$/, '').trim();
+    } else if (cleanedText.startsWith('```')) {
+      cleanedText = cleanedText.replace(/^```/, '').replace(/```$/, '').trim();
+    }
+
+    const parsed = JSON.parse(cleanedText || '{}');
+    if (parsed) {
       crawledTitle = parsed.title || crawledTitle;
       crawledAuthor = parsed.author || crawledAuthor;
       crawledContent = parsed.content || crawledContent;
       mockTags = parsed.tags || mockTags;
-    } catch (e) {
-      console.error('Crawler intelligence simulator fallback due to: ', e);
     }
+  } catch (e) {
+    console.error('Crawler intelligence simulator fallback due to: ', e);
   }
 
   // Fallback content if not crawled properly
@@ -816,12 +978,6 @@ app.get('/api/briefs', (req, res) => {
 });
 
 app.post('/api/briefs/generate', async (req, res) => {
-  if (!geminiApiKey) {
-    return res.status(400).json({
-      error: '请先在系统 Secrets 面板中配置您的 GEMINI_API_KEY。',
-    });
-  }
-
   try {
     // Collect all favorited articles or recent articles to feed into the digest context
     const favorites = currentDb.articles.filter((a) => a.is_favorite);
@@ -867,15 +1023,19 @@ ${contextText}
   ]
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-      },
+    const responseText = await handleAICall(req, {
+      prompt,
+      responseMimeType: 'application/json',
     });
 
-    const parsed = JSON.parse(response.text || '{}');
+    let cleanedText = responseText.trim();
+    if (cleanedText.startsWith('```json')) {
+      cleanedText = cleanedText.replace(/^```json/, '').replace(/```$/, '').trim();
+    } else if (cleanedText.startsWith('```')) {
+      cleanedText = cleanedText.replace(/^```/, '').replace(/```$/, '').trim();
+    }
+
+    const parsed = JSON.parse(cleanedText || '{}');
 
     const newReport: DailyReport = {
       id: `rep-${Date.now()}`,
@@ -906,17 +1066,11 @@ ${contextText}
   }
 });
 
-// 6. Knowledge QA Chatbot Core using Gemini API with Background Context
+// 6. Knowledge QA Chatbot Core using Multi-Model Engines with Background Context
 app.post('/api/ai/chatbot', async (req, res) => {
   const { messages, selectedArticleId } = req.body;
   if (!messages || !Array.isArray(messages)) {
     return res.status(400).json({ error: 'Missing chat messages list' });
-  }
-
-  if (!geminiApiKey) {
-    return res.status(400).json({
-      error: '请先在系统 Secrets 面板中配置您的 GEMINI_API_KEY。',
-    });
   }
 
   try {
@@ -950,22 +1104,17 @@ ${art.ai_summary ? `AI一句话总结: ${art.ai_summary.one_sentence}` : ''}`;
 
 ${knowledgeContext}`;
 
-    // Convert message list for chat structure
-    const geminiChatMessages = messages.map((m: any) => ({
-      role: m.sender === 'user' ? 'user' : 'model',
-      parts: [{ text: m.text }],
+    // Convert message list for chat or simple prompt structure
+    const chatMessages = messages.map((m: any) => ({
+      role: m.sender === 'user' ? 'user' : 'assistant',
+      content: m.text,
     }));
 
     // Generate output
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
-      contents: geminiChatMessages,
-      config: {
-        systemInstruction,
-      },
+    const replyText = await handleAICall(req, {
+      systemInstruction,
+      messages: chatMessages,
     });
-
-    const replyText = response.text || '暂未生成响应。';
 
     // Simulated sources grounding
     const groundingLinks: { title: string; url: string }[] = [];
